@@ -2,12 +2,20 @@ package tribserver
 
 import (
 	"errors"
+	"net/http"
 
+	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
+	"github.com/cmu440/tribbler/util"
+	"net/rpc"
+	"time"
 )
 
 type tribServer struct {
 	// TODO: implement this!
+	hostPort             string
+	masterServerHostPort string
+	ls                   libstore.Libstore
 }
 
 // NewTribServer creates, starts and returns a new TribServer. masterServerHostPort
@@ -17,30 +25,204 @@ type tribServer struct {
 //
 // For hints on how to properly setup RPC, see the rpc/tribrpc package.
 func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) {
-	return nil, errors.New("not implemented")
+	ts := tribServer{}
+
+	ts.hostPort = myHostPort
+	ts.masterServerHostPort = masterServerHostPort
+	ls, err := libstore.NewLibstore(ts.masterServerHostPort, ts.hostPort,
+		libstore.Never)
+	if err != nil {
+		return nil, err
+	}
+	ts.ls = ls
+	err = rpc.Register(&ts)
+	if err != nil {
+		return nil, err
+	}
+	rpc.HandleHTTP()
+	err = http.ListenAndServe(ts.hostPort, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &ts, nil
 }
 
 func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.CreateUserReply) error {
-	return errors.New("not implemented")
+	userID := args.UserID
+	userKey := util.FormatUserKey(userID)
+
+	// check whether user exists
+	result, err := ts.ls.Get(userKey)
+	if err != nil {
+		return err
+	}
+	if result != "" {
+		reply.Status = tribrpc.Exists
+		return nil
+	}
+
+	// if user does not exist, create the user
+	err = ts.ls.Put(userKey, "true")
+	if err != nil {
+		return err
+	}
+	reply.Status = tribrpc.OK
+	return nil
+
 }
 
 func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-	return errors.New("not implemented")
+	// check whether the target user exists
+	targetUserKey := util.FormatUserKey(args.TargetUserID)
+	result, err := ts.ls.Get(targetUserKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchTargetUser
+		return nil
+	}
+
+	// check whether the request user exists
+	userKey := util.FormatUserKey(args.UserID)
+	result, err = ts.ls.Get(userKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	// get existing subscription list
+	userSublistKey := util.FormatSubListKey(args.UserID)
+	subList, err := ts.ls.GetList(userSublistKey)
+	if err != nil {
+		return err
+	}
+	for _, u := range subList {
+		if u == args.TargetUserID {
+			reply.Status = tribrpc.Exists
+			return nil
+		}
+	}
+	err = ts.ls.AppendToList(userSublistKey, args.TargetUserID)
+	if err != nil {
+		return err
+	}
+	reply.Status = tribrpc.OK
+	return nil
 }
 
 func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-	return errors.New("not implemented")
+	// check whether the target user exists
+	targetUserKey := util.FormatUserKey(args.TargetUserID)
+	result, err := ts.ls.Get(targetUserKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchTargetUser
+		return nil
+	}
+
+	// check whether the request user exists
+	userKey := util.FormatUserKey(args.UserID)
+	result, err = ts.ls.Get(userKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	// get existing subscription list
+	userSublistKey := util.FormatSubListKey(args.UserID)
+	subList, err := ts.ls.GetList(userSublistKey)
+	if err != nil {
+		return err
+	}
+	for _, u := range subList {
+		if u == args.TargetUserID {
+			err = ts.ls.RemoveFromList(userSublistKey, args.TargetUserID)
+			if err != nil {
+				return err
+			}
+			reply.Status = tribrpc.OK
+			return nil
+		}
+	}
+	// Target user not in the subscription list
+	reply.Status = tribrpc.NoSuchTargetUser
+	return nil
 }
 
 func (ts *tribServer) GetFriends(args *tribrpc.GetFriendsArgs, reply *tribrpc.GetFriendsReply) error {
-	return errors.New("not implemented")
+	// check whether the request user exists
+	userKey := util.FormatUserKey(args.UserID)
+	result, err := ts.ls.Get(userKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	// Complexity too high if search one by one, let backend
+	// maintain the list
+	friendListKey := util.FormatFriendListKey(args.UserID)
+	list, err := ts.ls.GetList(friendListKey)
+	if err != nil {
+		return err
+	}
+	reply.UserIDs = list
+	reply.Status = tribrpc.OK
+	return nil
+}
+
+func (ts *tribServer) isUserExist(userID string) (bool, error) {
+	// check whether the request user exists
+	userKey := util.FormatUserKey(userID)
+	result, err := ts.ls.Get(userKey)
+	if err != nil {
+		return false, err
+	}
+	if result == "" {
+		return false, nil
+	} else {
+		return true, nil
+	}
+
 }
 
 func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.PostTribbleReply) error {
-	return errors.New("not implemented")
+	// check whether the request user exists
+	userKey := util.FormatUserKey(args.UserID)
+	result, err := ts.ls.Get(userKey)
+	if err != nil {
+		return err
+	}
+	if result == "" {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	// create the tribble
+	t := tribrpc.Tribble{UserID: args.UserID, Contents: args.Contents, Posted: time.Now()}
+	postKey := util.FormatPostKey(args.UserID, t.Posted.UnixNano())
+	err = ts.ls.Put(postKey, args.Contents)
+	if err != nil {
+		return err
+	}
+	reply.PostKey = postKey
+	reply.Status = tribrpc.OK
+	return nil
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
+	args
 	return errors.New("not implemented")
 }
 
