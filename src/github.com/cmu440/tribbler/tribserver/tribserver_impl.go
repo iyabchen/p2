@@ -47,16 +47,30 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 	return &ts, nil
 }
 
+func (ts *tribServer) isUserExisted(userID string) (bool, error) {
+	userKey := util.FormatUserKey(userID)
+	result, err := ts.ls.Get(userKey)
+	if err != nil {
+		return false, err
+	}
+	if result == "" {
+		return false, nil
+	} else {
+		return true, nil
+	}
+
+}
+
 func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.CreateUserReply) error {
 	userID := args.UserID
 	userKey := util.FormatUserKey(userID)
 
 	// check whether user exists
-	result, err := ts.ls.Get(userKey)
+	existed, err := ts.isUserExisted(userID)
 	if err != nil {
 		return err
 	}
-	if result != "" {
+	if existed {
 		reply.Status = tribrpc.Exists
 		return nil
 	}
@@ -73,23 +87,21 @@ func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.Cr
 
 func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
 	// check whether the target user exists
-	targetUserKey := util.FormatUserKey(args.TargetUserID)
-	result, err := ts.ls.Get(targetUserKey)
+	existed, err := ts.isUserExisted(args.TargetUserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchTargetUser
 		return nil
 	}
 
 	// check whether the request user exists
-	userKey := util.FormatUserKey(args.UserID)
-	result, err = ts.ls.Get(userKey)
+	existed, err = ts.isUserExisted(args.TargetUserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
@@ -116,23 +128,21 @@ func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tri
 
 func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
 	// check whether the target user exists
-	targetUserKey := util.FormatUserKey(args.TargetUserID)
-	result, err := ts.ls.Get(targetUserKey)
+	existed, err := ts.isUserExisted(args.TargetUserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchTargetUser
 		return nil
 	}
 
 	// check whether the request user exists
-	userKey := util.FormatUserKey(args.UserID)
-	result, err = ts.ls.Get(userKey)
+	existed, err = ts.isUserExisted(args.TargetUserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
@@ -159,13 +169,12 @@ func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *
 }
 
 func (ts *tribServer) GetFriends(args *tribrpc.GetFriendsArgs, reply *tribrpc.GetFriendsReply) error {
-	// check whether the request user exists
-	userKey := util.FormatUserKey(args.UserID)
-	result, err := ts.ls.Get(userKey)
+	// check whether the target user exists
+	existed, err := ts.isUserExisted(args.UserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
@@ -182,29 +191,13 @@ func (ts *tribServer) GetFriends(args *tribrpc.GetFriendsArgs, reply *tribrpc.Ge
 	return nil
 }
 
-func (ts *tribServer) isUserExist(userID string) (bool, error) {
-	// check whether the request user exists
-	userKey := util.FormatUserKey(userID)
-	result, err := ts.ls.Get(userKey)
-	if err != nil {
-		return false, err
-	}
-	if result == "" {
-		return false, nil
-	} else {
-		return true, nil
-	}
-
-}
-
 func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.PostTribbleReply) error {
-	// check whether the request user exists
-	userKey := util.FormatUserKey(args.UserID)
-	result, err := ts.ls.Get(userKey)
+	// check whether the target user exists
+	existed, err := ts.isUserExisted(args.UserID)
 	if err != nil {
 		return err
 	}
-	if result == "" {
+	if !existed {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
@@ -222,7 +215,16 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 }
 
 func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *tribrpc.DeleteTribbleReply) error {
-	args
+	// check whether the target user exists
+	existed, err := ts.isUserExisted(args.UserID)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+	args.PostKey
 	return errors.New("not implemented")
 }
 
