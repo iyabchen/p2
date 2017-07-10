@@ -2,8 +2,9 @@ package tribserver
 
 import (
 	"errors"
-	"net/http"
+	"net/rpc"
 
+	"encoding/json"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
 	"github.com/cmu440/tribbler/util"
@@ -224,14 +225,62 @@ func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *trib
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
-	args.PostKey
-	return errors.New("not implemented")
+
+	err = ts.ls.Delete(args.PostKey)
+	if err != nil {
+		return err
+	}
+
+	// invalidate the cache in libstore?
+
+	return nil
 }
 
+// returns a maximum of 100 tribs in reverse chronological order
 func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
-	return errors.New("not implemented")
+	// check whether the target user exists
+	existed, err := ts.isUserExisted(args.UserID)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	tribListKey := util.FormatTribListKey(args.UserID)
+	tribList, err := ts.ls.Get(tribListKey) // easier to unmarshal
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
-	return errors.New("not implemented")
+	// check whether the target user exists
+	existed, err := ts.isUserExisted(args.UserID)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	subListKey := util.FormatSubListKey(args.UserID)
+	tribList, err := ts.ls.Get(subListKey) // easier to unmarshal
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
+	if err != nil {
+		return err
+	}
+	return nil
 }

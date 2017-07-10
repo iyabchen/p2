@@ -2,12 +2,18 @@ package libstore
 
 import (
 	"errors"
+	"fmt"
+	"net/rpc"
+	"time"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
 type libstore struct {
-	// TODO: implement this!
+	masterServerHostPort string
+	myHostPort           string
+	mode                 LeaseMode
+	storageServerList    []storagerpc.Node
 }
 
 // NewLibstore creates a new instance of a TribServer's libstore. masterServerHostPort
@@ -35,19 +41,103 @@ type libstore struct {
 // need to create a brand new HTTP handler to serve the requests (the Libstore may
 // simply reuse the TribServer's HTTP handler since the two run in the same process).
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
-	return nil, errors.New("not implemented")
+	ls := new(libstore)
+	ls.masterServerHostPort = masterServerHostPort
+	ls.myHostPort = myHostPort
+	ls.mode = mode
+
+	cli, err := rpc.DialHTTP("tcp", masterServerHostPort)
+	if err != nil {
+		return nil, err
+	}
+
+	args := &storagerpc.GetServersArgs{}
+	var reply storagerpc.GetServersReply
+	retryAttempts := 5
+
+	for i := 0; i < retryAttempts; i++ {
+		if err := cli.Call("StorageServer.GetServers", args, &reply); err != nil {
+			return nil, err
+		}
+		if reply.Status == storagerpc.OK {
+			break
+		} else if reply.Status == storagerpc.NotReady {
+			if i == 4 {
+				return nil, fmt.Errorf("Tried %d times, and servers are still not ready", retryAttempts)
+			}
+			time.Sleep(1 * time.Second)
+		} else {
+			return nil, fmt.Errorf("Calling StorageServer.GetServers returns abnormal status: %d", reply.Status)
+		}
+	}
+
+	ls.storageServerList = reply.Servers
+
+	return ls, nil
+}
+
+func (ls *libstore) schedule(key string) (*rpc.Client, error) {
+
+	node := ls.storageServerList[0]
+	cli, err := rpc.DialHTTP("tcp", node.HostPort)
+	if err != nil {
+		return nil, err
+	}
+	return cli, nil
 }
 
 func (ls *libstore) Get(key string) (string, error) {
-	return "", errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return "", err
+	}
+
+	args := storagerpc.GetArgs{Key: key, WantLease: false, HostPort: ls.myHostPort}
+	var reply storagerpc.GetReply
+
+	if err = cli.Call("StorageServer.Get", args, &reply); err != nil {
+		return "", err
+	}
+	if reply.Status == storagerpc.OK {
+		return reply.Value, nil
+	}
+	return "", fmt.Errorf("Return status %d", reply.Status)
 }
 
 func (ls *libstore) Put(key, value string) error {
-	return errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return err
+	}
+
+	args := storagerpc.PutArgs{Key: key, Value: value}
+	var reply storagerpc.PutReply
+
+	if err = cli.Call("StorageServer.Put", args, &reply); err != nil {
+		return err
+	}
+	if reply.Status == storagerpc.OK {
+		return nil
+	}
+	return fmt.Errorf("Return status %d", reply.Status)
 }
 
 func (ls *libstore) Delete(key string) error {
-	return errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return err
+	}
+
+	args := storagerpc.DeleteArgs{Key: key}
+	var reply storagerpc.DeleteReply
+
+	if err = cli.Call("StorageServer.Delete", args, &reply); err != nil {
+		return err
+	}
+	if reply.Status == storagerpc.OK {
+		return nil
+	}
+	return fmt.Errorf("Return status %d", reply.Status)
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {

@@ -2,12 +2,28 @@ package storageserver
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/rpc"
+	"strconv"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
+type role int
+type status int
+
 type storageServer struct {
 	// TODO: implement this!
+	isMaster    bool
+	serverList  map[string]*storageServer
+	masterHost  string
+	masterPort  int
+	numNodes    int
+	listenPort  int
+	nodeID      uint32
+	activeNodes int
+	joinNode    chan int
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -19,7 +35,55 @@ type storageServer struct {
 // This function should return only once all storage servers have joined the ring,
 // and should return a non-nil error if the storage server could not be started.
 func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID uint32) (StorageServer, error) {
-	return nil, errors.New("not implemented")
+	srv := new(storageServer)
+	if masterServerHostPort == "" {
+		srv.isMaster = true
+		srv.numNodes = numNodes
+		srv.masterPort = port
+		srv.activeNodes = 0
+		joinNode = make(chan int)
+
+	}
+	srv.listenPort = port
+	srv.nodeID = nodeID
+
+	if !srv.isMaster {
+		cli, err := rpc.DialHTTP("tcp", masterServerHostPort)
+		if err != nil {
+			return nil, err
+		}
+		nodeInfo := storagerpc.Node{NodeID: nodeID, HostPort: fmt.Sprintf("%s:%d", "localhost", port)}
+		args := storagerpc.RegisterArgs{nodeInfo}
+		var reply storagerpc.RegisterReply
+		if err = cli.Call("StorageServer.RegisterServer", args, &reply); err != nil {
+			return nil, err
+		}
+		if reply.Status == storagerpc.OK {
+			return srv, nil
+		}
+		return nil, fmt.Errorf("Returned status %d", reply.Status)
+	} else { // if master, then listen to RPC calls, until all joined
+
+		if err := rpc.Register(&srv); err != nil {
+			return nil, err
+		}
+		rpc.HandleHTTP()
+		go func() {
+			err := http.ListenAndServe(":"+strconv.Itoa(srv.listenPort), nil)
+			if err != nil {
+				fmt.Errorf("http server start failed with error:", err)
+			}
+		}()
+
+		select {
+		case <-srv.joinNode:
+			srv.activeNodes++
+			if srv.activeNodes == srv.numNodes {
+				break
+			}
+		}
+		return srv, nil
+	}
 }
 
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
