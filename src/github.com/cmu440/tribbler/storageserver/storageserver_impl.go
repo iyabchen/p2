@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"time"
 )
 
 type role int
@@ -16,6 +17,7 @@ type status int
 type storageServer struct {
 	// TODO: implement this!
 	isMaster    bool
+	mux         sync.Mutex
 	serverList  map[string]*storageServer
 	masterHost  string
 	masterPort  int
@@ -23,7 +25,8 @@ type storageServer struct {
 	listenPort  int
 	nodeID      uint32
 	activeNodes int
-	joinNode    chan int
+	joinNode    chan storagerpc.Node
+	// userMap  map[string]
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -41,7 +44,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 		srv.numNodes = numNodes
 		srv.masterPort = port
 		srv.activeNodes = 0
-		joinNode = make(chan int)
+		srv.joinNode = make(chan storagerpc.Node)
 
 	}
 	srv.listenPort = port
@@ -52,14 +55,19 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 		if err != nil {
 			return nil, err
 		}
-		nodeInfo := storagerpc.Node{NodeID: nodeID, HostPort: fmt.Sprintf("%s:%d", "localhost", port)}
+		nodeInfo := storagerpc.Node{NodeID: nodeID, HostPort: fmt.Sprintf(":%d", port)}
 		args := storagerpc.RegisterArgs{nodeInfo}
 		var reply storagerpc.RegisterReply
-		if err = cli.Call("StorageServer.RegisterServer", args, &reply); err != nil {
-			return nil, err
-		}
-		if reply.Status == storagerpc.OK {
-			return srv, nil
+
+		for {
+			if err = cli.Call("StorageServer.RegisterServer", args, &reply); err != nil {
+				return nil, err
+			}
+			if reply.Status == storagerpc.OK {
+				break
+			} else {
+				time.Sleep(1 * time.Second)
+			}
 		}
 		return nil, fmt.Errorf("Returned status %d", reply.Status)
 	} else { // if master, then listen to RPC calls, until all joined
@@ -87,10 +95,32 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 }
 
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	return errors.New("not implemented")
+	ss.joinNode <- args.ServerInfo
+	ss.mux.RLock()
+	if ss.activeNodes < ss.numNodes {
+		reply.Status = storagerpc.NotReady
+	} else {
+		reply.Status = storagerpc.OK
+	}
+	reply.Servers = make([]storagerpc.Node, len(ss.activeNodes))
+	copy(reply.Servers, ss.activeNodes)
+
+	ss.mux.UnRlock()
+
+	return nil
 }
 
 func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *storagerpc.GetServersReply) error {
+	ss.mux.RLock()
+	if ss.activeNodes < ss.numNodes {
+		reply.Status = storagerpc.NotReady
+	} else {
+		reply.Status = storagerpc.OK
+	}
+	reply.Servers = make([]storagerpc.Node, len(ss.activeNodes))
+	copy(reply.Servers, ss.activeNodes)
+	ss.mux.UnRlock()
+
 	return errors.New("not implemented")
 }
 
