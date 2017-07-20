@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"net/rpc"
 	"strconv"
-	"sync"
-
-	"github.com/cmu440/tribbler/rpc/storagerpc"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/cmu440/tribbler/libstore"
+	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
 type role int
@@ -19,7 +20,7 @@ type status int
 type storageServer struct {
 	// TODO: implement this!
 	isMaster      bool
-	activeNodes   nodeMap
+	activeNodes   nodeList
 	masterHost    string
 	masterPort    int
 	numNodes      int
@@ -27,11 +28,12 @@ type storageServer struct {
 	nodeID        uint32
 	joinNode      chan storagerpc.Node
 	joinNodeReply chan storagerpc.Status
-	userMap       resourceList
+	userMap       resource
 	userFriendMap resourceList
 	userSubMap    resourceList
 	userTribMap   resourceList
-	tribMap       resource
+	tribs         resource
+	prevNodeID    uint32
 }
 
 type resourceList struct {
@@ -44,9 +46,9 @@ type resource struct {
 	content map[string]string
 }
 
-type nodeMap struct {
+type nodeList struct {
 	sync.RWMutex
-	nodes map[uint32]string
+	nodes []storagerpc.Node
 }
 
 // NewStorageServer creates and starts a new StorageServer. masterServerHostPort
@@ -59,12 +61,11 @@ type nodeMap struct {
 // and should return a non-nil error if the storage server could not be started.
 func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID uint32) (StorageServer, error) {
 	srv := new(storageServer)
-	srv.activeNodes = nodeMap{nodes: make(map[uint32]string)}
-	srv.userMap = resourceList{content: make(map[string][]string)}
+	srv.userMap = resource{content: make(map[string]string)}
 	srv.userSubMap = resourceList{content: make(map[string][]string)}
 	srv.userFriendMap = resourceList{content: make(map[string][]string)}
 	srv.userTribMap = resourceList{content: make(map[string][]string)}
-	srv.tribMap = resource{content: make(map[string]string)}
+	srv.tribs = resource{content: make(map[string]string)}
 
 	if masterServerHostPort == "" {
 		srv.isMaster = true
@@ -95,10 +96,25 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 				time.Sleep(1 * time.Second)
 			}
 		}
-		return nil, fmt.Errorf("Returned status %d", reply.Status)
+		srv.activeNodes.nodes = reply.Servers
+		for ix, n := range srv.activeNodes.nodes {
+			if n.NodeID == srv.nodeID {
+				if ix == 0 {
+					srv.prevNodeID = 0
+				} else {
+					srv.prevNodeID = srv.activeNodes.nodes[ix-1].NodeID
+				}
+
+			}
+		}
+		return srv, nil
 	} else { // if master, then listen to RPC calls, until all joined
-		srv.activeNodes.RLock()
-		srv.activeNodes.nodes[nodeID] = masterServerHostPort
+		srv.activeNodes.Lock()
+
+		srv.activeNodes = nodeList{nodes: make([]storagerpc.Node, 1)}
+		srv.activeNodes.nodes[0] = storagerpc.Node{
+			HostPort: srv.masterHost,
+			NodeID:   srv.nodeID}
 		srv.activeNodes.Unlock()
 
 		if err := rpc.Register(&srv); err != nil {
@@ -114,17 +130,25 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 
 		for {
 			newNode := <-srv.joinNode
-			srv.activeNodes.RLock()
-			srv.activeNodes.nodes[newNode.NodeID] = newNode.HostPort
+			srv.activeNodes.Lock()
+			// insert based on nodeID
+			srv.activeNodes.nodes = append(srv.activeNodes.nodes, newNode)
+			for ix, n := range srv.activeNodes.nodes {
+				if newNode.NodeID < n.NodeID {
+					copy(srv.activeNodes.nodes[ix+1:], srv.activeNodes.nodes[ix:])
+					srv.activeNodes.nodes[ix] = newNode
+					break
+				}
+			}
 			if len(srv.activeNodes.nodes) == srv.numNodes {
-				srv.activeNodes.RUnlock()
+				srv.activeNodes.Unlock()
 				break
 			}
 			status := storagerpc.NotReady
 			if len(srv.activeNodes.nodes) == srv.numNodes {
 				status = storagerpc.OK
 			}
-			srv.activeNodes.RUnlock()
+			srv.activeNodes.Unlock()
 			srv.joinNodeReply <- status
 			if status == storagerpc.OK {
 				break
@@ -140,12 +164,7 @@ func (ss *storageServer) getActiveNodes() []storagerpc.Node {
 	defer ss.activeNodes.RUnlock()
 
 	ret := make([]storagerpc.Node, len(ss.activeNodes.nodes))
-	i := 0
-	for id, hostport := range ss.activeNodes.nodes {
-		ret[i].NodeID = id
-		ret[i].HostPort = hostport
-		i++
-	}
+	copy(ss.activeNodes.nodes, ret)
 	return ret
 }
 
@@ -171,7 +190,12 @@ func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) checkKeyValid(key string) bool {
-	return true
+	hash := libstore.StoreHash(key)
+
+	if hash > ss.prevNodeID && hash <= ss.nodeID {
+		return true
+	}
+	return false
 }
 
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
@@ -187,34 +211,59 @@ func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 	switch {
 	case key == "usrid":
 		ss.userMap.RLock()
-		defer ss.userMap.RUnlock()
-		if _, ok := ss.userMap.content[usrID]; !ok {
-			reply.Status = storagerpc.KeyNotFound
-			return nil
-		} else {
+		if _, ok := ss.userMap.content[usrID]; ok {
 			reply.Status = storagerpc.OK
-		}
-	case strings.HasPrefix(key, "post"):
-		tribs, ok := ss.userTribMap[usrID]
-		if !ok {
-			return errors.New("internal error: content mismatch")
-		}
-		tribShard.RLock()
-		defer tribShard.RUnlock()
-		trib, ok := tribShard.tribMap[key]
-		if !ok {
-			reply.Status = storagerpc.KeyNotFound
 		} else {
-			reply.Value = trib
-			reply.Status = storagerpc.OK
+			reply.Status = storagerpc.ItemNotFound
 		}
+		ss.userMap.RUnlock()
+
+	case strings.HasPrefix(key, "post_"):
+		ss.tribs.RLock()
+		if val, ok := ss.tribs.content[key]; ok {
+			reply.Value = val
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	default:
+		return fmt.Errorf("get does not accept key %s", key)
 	}
 
 	return nil
 }
 
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	return errors.New("not implemented")
+	if !ss.checkKeyValid(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
+
+	keyParts := strings.Split(args.Key, ":")
+	// usrID := keyParts[0]
+	key := keyParts[1]
+
+	switch {
+	case key == "usrid":
+		return fmt.Errorf("Cannot remove a user")
+
+	case strings.HasPrefix(key, "post_"):
+		ss.tribs.Lock()
+		if _, ok := ss.tribs.content[key]; ok {
+			delete(ss.tribs.content, key)
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	default:
+		return fmt.Errorf("get does not accept key %s", key)
+	}
+
+	return nil
 }
 
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
@@ -222,7 +271,48 @@ func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.Get
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
+	keyParts := strings.Split(args.Key, ":")
+	usrID := keyParts[0]
+	key := keyParts[1]
+	switch {
+	case key == "sublist":
+		ss.userSubMap.RLock()
+		if subs, ok := ss.userSubMap.content[usrID]; ok {
+			reply.Status = storagerpc.OK
+			for _, sub := range subs {
+				ss.userTribMap.RLock()
+				tribs := ss.userTribMap.content[sub]
+				reply.Value = append(reply.Value, tribs...)
+				ss.userTribMap.RUnlock()
+			}
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.userSubMap.RUnlock()
 
+	case key == "triblist":
+		ss.tribs.RLock()
+		if val, ok := ss.userTribMap.content[usrID]; ok {
+			reply.Value = val
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	case key == "friendlist":
+		ss.userFriendMap.RLock()
+		if val, ok := ss.userFriendMap.content[usrID]; ok {
+			reply.Value = val
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	default:
+		return fmt.Errorf("get does not accept key %s", key)
+	}
 	return nil
 }
 
@@ -235,25 +325,81 @@ func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 	keyParts := strings.Split(args.Key, ":")
 	usrID := keyParts[0]
 	key := keyParts[1]
+
 	switch {
 	case key == "usrid":
 		ss.userMap.Lock()
-		defer ss.userMap.Unlock()
-		if _, ok := ss.userMap.content[key]; ok {
-			reply.Status = storagerpc.ItemExists
-		} else {
-			ss.userMap.content[key] = []string{"true"}
-			ss.userTribMap[key] = []string{}
-			reply.Status = storagerpc.OK
-		}
+		ss.userMap.content[usrID] = "true"
+		ss.userMap.Unlock()
+
+	case strings.HasPrefix(key, "post_"):
+		ss.tribs.Lock()
+		ss.tribs.content[key] = args.Value
+		ss.tribs.RUnlock()
+
+	default:
+		return fmt.Errorf("put does not accept key %s", key)
+	}
 
 	return nil
 }
 
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	if !ss.checkKeyValid(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
+
+	keyParts := strings.Split(args.Key, ":")
+	usrID := keyParts[0]
+	key := keyParts[1]
+	switch {
+	case key == "sublist":
+		ss.userSubMap.RLock()
+		if subs, ok := ss.userSubMap.content[usrID]; ok {
+			reply.Status = storagerpc.OK
+			for _, sub := range subs {
+				ss.userTribMap.RLock()
+				tribs := ss.userTribMap.content[sub]
+				reply.Value = append(reply.Value, tribs...)
+				ss.userTribMap.RUnlock()
+			}
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.userSubMap.RUnlock()
+
+	case key == "triblist":
+		ss.tribs.RLock()
+		if val, ok := ss.userTribMap.content[usrID]; ok {
+			reply.Value = val
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	case key == "friendlist":
+		ss.userFriendMap.RLock()
+		if val, ok := ss.userFriendMap.content[usrID]; ok {
+			reply.Value = val
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+		ss.tribs.RUnlock()
+
+	default:
+		return fmt.Errorf("get does not accept key %s", key)
+	}
+	return nil
 }
 
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	if !ss.checkKeyValid(args.Key) {
+		reply.Status = storagerpc.WrongServer
+		return nil
+	}
+
+	return nil
 }
