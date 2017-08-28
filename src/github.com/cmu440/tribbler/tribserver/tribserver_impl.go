@@ -1,13 +1,11 @@
 package tribserver
 
 import (
-	"errors"
-	"net/rpc"
-
 	"encoding/json"
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
 	"github.com/cmu440/tribbler/util"
+	"net/http"
 	"net/rpc"
 	"time"
 )
@@ -36,8 +34,7 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 		return nil, err
 	}
 	ts.ls = ls
-	err = rpc.Register(&ts)
-	if err != nil {
+	if err = rpc.RegisterName("TribServer", tribrpc.Wrap(ts)); err != nil {
 		return nil, err
 	}
 	rpc.HandleHTTP()
@@ -283,4 +280,11 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 		return err
 	}
 	return nil
+}
+
+// AddSubscription adds TargerUserID to UserID's list of subscriptions.
+// Replies with status NoSuchUser if the specified UserID does not exist, and NoSuchTargerUser
+// if the specified TargerUserID does not exist.
+func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
+
 }

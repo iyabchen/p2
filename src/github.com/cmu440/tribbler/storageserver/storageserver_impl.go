@@ -1,7 +1,6 @@
 package storageserver
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/rpc"
@@ -107,19 +106,17 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 
 			}
 		}
-		return srv, nil
 	} else { // if master, then listen to RPC calls, until all joined
-		srv.activeNodes.Lock()
 
 		srv.activeNodes = nodeList{nodes: make([]storagerpc.Node, 1)}
 		srv.activeNodes.nodes[0] = storagerpc.Node{
 			HostPort: srv.masterHost,
 			NodeID:   srv.nodeID}
-		srv.activeNodes.Unlock()
 
-		if err := rpc.Register(&srv); err != nil {
+		if err := rpc.RegisterName("StorageServer", storagerpc.Wrap(srv)); err != nil {
 			return nil, err
 		}
+
 		rpc.HandleHTTP()
 		go func() {
 			err := http.ListenAndServe(":"+strconv.Itoa(srv.listenPort), nil)
@@ -155,8 +152,9 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID ui
 			}
 
 		}
-		return srv, nil
 	}
+	return srv, nil
+
 }
 
 func (ss *storageServer) getActiveNodes() []storagerpc.Node {
@@ -356,14 +354,13 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 	switch {
 	case key == "sublist":
 		ss.userSubMap.RLock()
-		if subs, ok := ss.userSubMap.content[usrID]; ok {
+		if _, ok := ss.userSubMap.content[usrID]; ok {
 			reply.Status = storagerpc.OK
-			for _, sub := range subs {
-				ss.userTribMap.RLock()
-				tribs := ss.userTribMap.content[sub]
-				reply.Value = append(reply.Value, tribs...)
-				ss.userTribMap.RUnlock()
-			}
+			// for _, sub := range subs {
+			// 	ss.userTribMap.RLock()
+			//	tribs := ss.userTribMap.content[sub]
+			// 	ss.userTribMap.RUnlock()
+			// }
 		} else {
 			reply.Status = storagerpc.ItemNotFound
 		}
@@ -371,8 +368,7 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 
 	case key == "triblist":
 		ss.tribs.RLock()
-		if val, ok := ss.userTribMap.content[usrID]; ok {
-			reply.Value = val
+		if _, ok := ss.userTribMap.content[usrID]; ok {
 			reply.Status = storagerpc.OK
 		} else {
 			reply.Status = storagerpc.ItemNotFound
@@ -381,8 +377,7 @@ func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerp
 
 	case key == "friendlist":
 		ss.userFriendMap.RLock()
-		if val, ok := ss.userFriendMap.content[usrID]; ok {
-			reply.Value = val
+		if _, ok := ss.userFriendMap.content[usrID]; ok {
 			reply.Status = storagerpc.OK
 		} else {
 			reply.Status = storagerpc.ItemNotFound
