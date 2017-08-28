@@ -270,6 +270,42 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 	}
 
 	subListKey := util.FormatSubListKey(args.UserID)
+	// TODO
+	// tribList, err := ts.ls.Get(subListKey) // easier to unmarshal
+	// if err != nil {
+	// 	return err
+	// }
+
+	// err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
+	// if err != nil {
+	// 	return err
+	// }
+	return nil
+}
+
+// AddSubscription adds TargerUserID to UserID's list of subscriptions.
+// Replies with status NoSuchUser if the specified UserID does not exist, and NoSuchTargerUser
+// if the specified TargerUserID does not exist.
+func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
+	existed, err := ts.isUserExisted(args.UserID)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		reply.Status = tribrpc.NoSuchUser
+		return nil
+	}
+
+	existed, err = ts.isUserExisted(args.TargetUserID)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		reply.Status = tribrpc.NoSuchTargetUser
+		return nil
+	}
+
+	subListKey := util.Format.FormatSubListKey(args.UserID)
 	tribList, err := ts.ls.Get(subListKey) // easier to unmarshal
 	if err != nil {
 		return err
@@ -280,11 +316,4 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 		return err
 	}
 	return nil
-}
-
-// AddSubscription adds TargerUserID to UserID's list of subscriptions.
-// Replies with status NoSuchUser if the specified UserID does not exist, and NoSuchTargerUser
-// if the specified TargerUserID does not exist.
-func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-
 }
