@@ -5,8 +5,12 @@ import (
 	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
 	"github.com/cmu440/tribbler/util"
+	"log"
 	"net/http"
 	"net/rpc"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +20,24 @@ type tribServer struct {
 	masterServerHostPort string
 	ls                   libstore.Libstore
 }
+
+// Sorting tribkeys by reverse chronical timestamp
+type ByTribkeyTimestamp []string
+
+func (t ByTribkeyTimestamp) Len() int { return len(t) }
+func (t ByTribkeyTimestamp) Swap(i, j int) {
+	t[i], t[j] = t[j], t[i]
+}
+func (t ByTribkeyTimestamp) Less(i, j int) bool {
+	tiArrs := strings.Split(t[i], "_")
+	tjArrs := strings.Split(t[j], "_")
+	if len(tiArrs) != 3 || len(tjArrs) != 3 {
+		log.Fatal("Incorrect tribkey.")
+	}
+	return tiArrs[1] > tjArrs[1]
+}
+
+var defaultFetchSize int = 100
 
 // NewTribServer creates, starts and returns a new TribServer. masterServerHostPort
 // is the master storage server's host:port and port is this port number on which
@@ -34,14 +56,17 @@ func NewTribServer(masterServerHostPort, myHostPort string) (TribServer, error) 
 		return nil, err
 	}
 	ts.ls = ls
-	if err = rpc.RegisterName("TribServer", tribrpc.Wrap(ts)); err != nil {
+	if err = rpc.RegisterName("TribServer", tribrpc.Wrap(&ts)); err != nil {
 		return nil, err
 	}
 	rpc.HandleHTTP()
-	err = http.ListenAndServe(ts.hostPort, nil)
-	if err != nil {
-		return nil, err
-	}
+	go func() {
+		err = http.ListenAndServe(ts.hostPort, nil)
+		if err != nil {
+			log.Fatalf("http server start failed with error: %v", err)
+		}
+	}()
+
 	return &ts, nil
 }
 
@@ -83,6 +108,9 @@ func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.Cr
 
 }
 
+// AddSubscription adds TargerUserID to UserID's list of subscriptions.
+// Replies with status NoSuchUser if the specified UserID does not exist, and NoSuchTargerUser
+// if the specified TargerUserID does not exist.
 func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
 	// check whether the target user exists
 	existed, err := ts.isUserExisted(args.TargetUserID)
@@ -233,7 +261,9 @@ func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *trib
 	return nil
 }
 
-// returns a maximum of 100 tribs in reverse chronological order
+// GetTribbles retrieves a list of at most 100 tribbles posted by the specified
+// UserID in reverse chronological order (most recent first).
+// Replies with status NoSuchUser if the specified UserID does not exist.
 func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
 	// check whether the target user exists
 	existed, err := ts.isUserExisted(args.UserID)
@@ -246,18 +276,31 @@ func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.
 	}
 
 	tribListKey := util.FormatTribListKey(args.UserID)
-	tribList, err := ts.ls.Get(tribListKey) // easier to unmarshal
+	tribList, err := ts.ls.GetList(tribListKey) // easier to unmarshal
 	if err != nil {
 		return err
 	}
 
-	err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
-	if err != nil {
-		return err
+	sort.Sort(sort.Reverse(sort.StringSlice(tribList)))
+	i := 0
+	for i < defaultFetchSize {
+		tribContent, err := ts.ls.Get(tribList[i])
+		if err == nil {
+			var t tribrpc.Tribble
+			err = json.Unmarshal([]byte(tribContent), &t)
+			if err != nil {
+				reply.Tribbles = append(reply.Tribbles, t)
+				i++
+			}
+		}
 	}
 	return nil
 }
 
+// GetTribblesBySubscription retrieves a list of at most 100 tribbles posted by
+// all users to which the specified UserID is subscribed in reverse chronological
+// order (most recent first).  Replies with status NoSuchUser if the specified UserID
+// does not exist.
 func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, reply *tribrpc.GetTribblesReply) error {
 	// check whether the target user exists
 	existed, err := ts.isUserExisted(args.UserID)
@@ -269,51 +312,53 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 		return nil
 	}
 
-	subListKey := util.FormatSubListKey(args.UserID)
-	// TODO
-	// tribList, err := ts.ls.Get(subListKey) // easier to unmarshal
-	// if err != nil {
-	// 	return err
-	// }
+	subscribedUsers, err := ts.ls.GetList(util.FormatSubListKey(args.UserID))
+	if err != nil {
+		return err
+	}
 
-	// err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
-	// if err != nil {
-	// 	return err
-	// }
+	tribKeys := []string{}
+	for i := len(subscribedUsers) - 1; i > 0; i-- {
+		subUserID := subscribedUsers[i]
+		subTribKeys, err := ts.ls.GetList(util.FormatTribListKey(subUserID))
+		if err != nil {
+			tribKeys = append(tribKeys, subTribKeys...)
+		}
+	}
+	// sort keys based on timestamp
+	sort.Sort(ByTribkeyTimestamp(tribKeys))
+	for _, tribKey := range tribKeys {
+		tribContent, err := ts.ls.Get(tribKey)
+		if err != nil {
+			usrID, timestamp := parseTribKey(tribKey)
+			trib := tribrpc.Tribble{usrID, timestamp, tribContent}
+			reply.Tribbles = append(reply.Tribbles, trib)
+		}
+		if len(reply.Tribbles) == 100 {
+			break
+		}
+	}
+	reply.Status = tribrpc.OK
 	return nil
 }
 
-// AddSubscription adds TargerUserID to UserID's list of subscriptions.
-// Replies with status NoSuchUser if the specified UserID does not exist, and NoSuchTargerUser
-// if the specified TargerUserID does not exist.
-func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-	existed, err := ts.isUserExisted(args.UserID)
-	if err != nil {
-		return err
+func parseTribKey(key string) (usrID string, timestamp time.Time) {
+	strs := strings.Split(key, ":")
+	if len(strs) != 2 {
+		log.Fatal("Wrong format of tribkey")
 	}
-	if !existed {
-		reply.Status = tribrpc.NoSuchUser
-		return nil
+	usrID = strs[0]
+	subStrs := strings.Split(strs[1], "_")
+	if len(subStrs) != 3 {
+		log.Fatal("Wrong format of tribkey")
 	}
 
-	existed, err = ts.isUserExisted(args.TargetUserID)
+	i, err := strconv.ParseInt(subStrs[1], 10, 64)
 	if err != nil {
-		return err
+		log.Fatal("Failed to convert timestamp to int")
 	}
-	if !existed {
-		reply.Status = tribrpc.NoSuchTargetUser
-		return nil
-	}
+	// At post, key is formatted with time.UnixNano
+	timestamp = time.Unix(0, i)
+	return
 
-	subListKey := util.Format.FormatSubListKey(args.UserID)
-	tribList, err := ts.ls.Get(subListKey) // easier to unmarshal
-	if err != nil {
-		return err
-	}
-
-	err = json.Unmarshal([]byte(tribList), &reply.Tribbles)
-	if err != nil {
-		return err
-	}
-	return nil
 }
