@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -x
+
 if [ -z $GOPATH ]; then
     echo "FAIL: GOPATH environment variable is not set"
     exit 1

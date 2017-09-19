@@ -3,11 +3,14 @@ package libstore
 import (
 	"errors"
 	"fmt"
-	"net/rpc"
-	"time"
-
 	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"log"
+	"net/rpc"
+	"os"
+	"time"
 )
+
+var LOGE = log.New(os.Stderr, "", log.Lshortfile|log.Lmicroseconds)
 
 type libstore struct {
 	masterServerHostPort string
@@ -41,6 +44,7 @@ type libstore struct {
 // need to create a brand new HTTP handler to serve the requests (the Libstore may
 // simply reuse the TribServer's HTTP handler since the two run in the same process).
 func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libstore, error) {
+
 	ls := new(libstore)
 	ls.masterServerHostPort = masterServerHostPort
 	ls.myHostPort = myHostPort
@@ -96,12 +100,15 @@ func (ls *libstore) Get(key string) (string, error) {
 	var reply storagerpc.GetReply
 
 	if err = cli.Call("StorageServer.Get", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.Get: %s", err)
 		return "", err
 	}
 	if reply.Status == storagerpc.OK {
 		return reply.Value, nil
+	} else if reply.Status != storagerpc.KeyNotFound {
+		LOGE.Fatalf("StorageServer.Get return unexpected status: %s", reply.Status)
 	}
-	return "", fmt.Errorf("Return status %d", reply.Status)
+	return "", fmt.Errorf("libstore.Get: key %s not found", key)
 }
 
 func (ls *libstore) Put(key, value string) error {
@@ -114,12 +121,15 @@ func (ls *libstore) Put(key, value string) error {
 	var reply storagerpc.PutReply
 
 	if err = cli.Call("StorageServer.Put", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.Put: %s", err)
 		return err
 	}
 	if reply.Status == storagerpc.OK {
 		return nil
 	}
-	return fmt.Errorf("Return status %d", reply.Status)
+	LOGE.Fatalf("StorageServer.Put return unexpected status: %s", reply.Status)
+
+	return fmt.Errorf("Return status %s", reply.Status)
 }
 
 func (ls *libstore) Delete(key string) error {
@@ -132,24 +142,72 @@ func (ls *libstore) Delete(key string) error {
 	var reply storagerpc.DeleteReply
 
 	if err = cli.Call("StorageServer.Delete", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.Delete: %s", err)
 		return err
 	}
 	if reply.Status == storagerpc.OK {
 		return nil
+	} else if reply.Status != storagerpc.KeyNotFound {
+		LOGE.Fatalf("StorageServer.Delete return unexpected status: %s", reply.Status)
 	}
-	return fmt.Errorf("Return status %d", reply.Status)
+	return fmt.Errorf("Return status %s", reply.Status)
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {
-	return nil, errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return nil, err
+	}
+	args := storagerpc.GetArgs{Key: key}
+	var reply storagerpc.GetListReply
+	if err = cli.Call("StorageServer.GetList", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.GetList: %s", err)
+		return nil, err
+	}
+	if reply.Status == storagerpc.OK {
+		return reply.Value, nil
+	} else if reply.Status != storagerpc.KeyNotFound {
+		LOGE.Fatalf("StorageServer.GetList return unexpected status: %s", reply.Status)
+	}
+	return nil, fmt.Errorf("libstore.GetList:GetList key %s returns status %s", key, reply.Status)
 }
 
 func (ls *libstore) RemoveFromList(key, removeItem string) error {
-	return errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return err
+	}
+	args := storagerpc.PutArgs{Key: key, Value: removeItem}
+	var reply storagerpc.PutReply
+	if err = cli.Call("StorageServer.RemoveFromList", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.RemoveFromList: %s", err)
+		return err
+	}
+	if reply.Status == storagerpc.OK {
+		return nil
+	} else if reply.Status != storagerpc.ItemNotFound {
+		LOGE.Fatalf("StorageServer.RemoveFromList return unexpected status: %s", reply.Status)
+	}
+	return fmt.Errorf("Return status %s", reply.Status)
 }
 
 func (ls *libstore) AppendToList(key, newItem string) error {
-	return errors.New("not implemented")
+	cli, err := ls.schedule(key)
+	if err != nil {
+		return err
+	}
+	args := storagerpc.PutArgs{Key: key, Value: newItem}
+	var reply storagerpc.PutReply
+	if err = cli.Call("StorageServer.AppendToList", args, &reply); err != nil {
+		LOGE.Fatalf("rpc error in StorageServer.AppendToList: %s", err)
+		return err
+	}
+	if reply.Status == storagerpc.OK {
+		return nil
+	} else if reply.Status != storagerpc.ItemExists {
+		LOGE.Fatalf("StorageServer.AppendToList return unexpected status: %s", reply.Status)
+	}
+	return fmt.Errorf("Return status %s", reply.Status)
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {

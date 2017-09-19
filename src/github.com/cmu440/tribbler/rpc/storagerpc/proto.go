@@ -94,3 +94,21 @@ type RevokeLeaseArgs struct {
 type RevokeLeaseReply struct {
 	Status Status
 }
+
+func (s Status) String() string {
+	if s == 1 {
+		return "OK"
+	} else if s == 2 {
+		return "KeyNotFound"
+	} else if s == 3 {
+		return "ItemNotFound"
+	} else if s == 4 {
+		return "WrongServer"
+	} else if s == 5 {
+		return "ItemExists"
+	} else if s == 6 {
+		return "NotReady"
+	}
+	return "NotDefined"
+
+}

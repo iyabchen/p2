@@ -24,7 +24,7 @@ func FormatSubListKey(userID string) string {
 // If it turns out to be not unique, call this function again to generate a new one.
 func FormatPostKey(userID string, postTime int64) string {
 	return fmt.Sprintf("%s:post_%x_%x", userID, postTime,
-		rand.New(rand.NewSource(time.Now().Unix())))
+		rand.New(rand.NewSource(time.Now().UnixNano())).Int())
 }
 
 // format key to associate with a user's list for tribble keys
