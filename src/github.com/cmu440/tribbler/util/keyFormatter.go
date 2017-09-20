@@ -32,9 +32,3 @@ func FormatPostKey(userID string, postTime int64) string {
 func FormatTribListKey(userID string) string {
 	return fmt.Sprintf("%s:triblist", userID)
 }
-
-// format key to associate with a user's friend list
-// example roc => roc:friendlist
-func FormatFriendListKey(userID string) string {
-	return fmt.Sprintf("%s:friendlist", userID)
-}

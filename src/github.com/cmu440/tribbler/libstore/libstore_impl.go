@@ -13,6 +13,7 @@ import (
 var LOGE = log.New(os.Stderr, "", log.Lshortfile|log.Lmicroseconds)
 
 type libstore struct {
+	cli                  *rpc.Client
 	masterServerHostPort string
 	myHostPort           string
 	mode                 LeaseMode
@@ -54,6 +55,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	if err != nil {
 		return nil, err
 	}
+	ls.cli = cli
 
 	args := &storagerpc.GetServersArgs{}
 	var reply storagerpc.GetServersReply
@@ -82,12 +84,13 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 
 func (ls *libstore) schedule(key string) (*rpc.Client, error) {
 
-	node := ls.storageServerList[0]
-	cli, err := rpc.DialHTTP("tcp", node.HostPort)
-	if err != nil {
-		return nil, err
-	}
-	return cli, nil
+	// node := ls.storageServerList[0]
+	// cli, err := rpc.DialHTTP("tcp", node.HostPort)
+	// if err != nil {
+	// 	LOGE.Fatalf("rpc dialhttp error for %s: %s", node.HostPort, err)
+	// 	return nil, err
+	// }
+	return ls.cli, nil
 }
 
 func (ls *libstore) Get(key string) (string, error) {
@@ -158,6 +161,7 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	args := storagerpc.GetArgs{Key: key}
 	var reply storagerpc.GetListReply
 	if err = cli.Call("StorageServer.GetList", args, &reply); err != nil {
@@ -177,6 +181,7 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 	if err != nil {
 		return err
 	}
+
 	args := storagerpc.PutArgs{Key: key, Value: removeItem}
 	var reply storagerpc.PutReply
 	if err = cli.Call("StorageServer.RemoveFromList", args, &reply); err != nil {
@@ -196,6 +201,7 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 	if err != nil {
 		return err
 	}
+
 	args := storagerpc.PutArgs{Key: key, Value: newItem}
 	var reply storagerpc.PutReply
 	if err = cli.Call("StorageServer.AppendToList", args, &reply); err != nil {
