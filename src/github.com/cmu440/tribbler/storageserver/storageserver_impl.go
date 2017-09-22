@@ -2,10 +2,11 @@ package storageserver
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/rpc"
-	"strconv"
-	"strings"
+	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -13,387 +14,318 @@ import (
 	"github.com/cmu440/tribbler/rpc/storagerpc"
 )
 
+var LOGE = log.New(os.Stderr, "", log.Lshortfile|log.Lmicroseconds)
+
 type role int
 type status int
 
 type storageServer struct {
-	// TODO: implement this!
-	isMaster      bool
-	activeNodes   nodeList
-	masterHost    string
-	masterPort    int
-	numNodes      int
-	listenPort    int
-	nodeID        uint32
-	joinNode      chan storagerpc.Node
-	joinNodeReply chan storagerpc.Status
-	userMap       resource
-	userFriendMap resourceList
-	userSubMap    resourceList
-	userTribMap   resourceList
-	tribs         resource
-	prevNodeID    uint32
+	httpServer *http.Server
+	nodesMutex sync.RWMutex
+	nodes      []storagerpc.Node
+	nodeInx    int
+	numNodes   int
+	nodeInfo   storagerpc.Node
+	isMaster   bool
+
+	// master-only
+	doneBootstrap chan bool
+
+	// storage
+	storeMutex sync.RWMutex
+	store      map[string]interface{}
 }
 
-type resourceList struct {
-	sync.RWMutex
-	content map[string][]string
+type ByNodeID []storagerpc.Node
+
+func (t ByNodeID) Len() int { return len(t) }
+func (t ByNodeID) Swap(i, j int) {
+	t[i], t[j] = t[j], t[i]
+}
+func (t ByNodeID) Less(i, j int) bool {
+	return t[i].NodeID < t[j].NodeID
 }
 
-type resource struct {
-	sync.RWMutex
-	content map[string]string
-}
-
-type nodeList struct {
-	sync.RWMutex
-	nodes []storagerpc.Node
-}
-
-// NewStorageServer creates and starts a new StorageServer. masterServerHostPort
-// is the master storage server's host:port address. If empty, then this server
-// is the master; otherwise, this server is a slave. numNodes is the total number of
-// servers in the ring. port is the port number that this server should listen on.
+// NewStorageServer creates and starts a new StorageServer.
+// masterServerHostPort is the master storage server's host:port address.
+// If empty, then this server is the master; otherwise, this server is a slave.
+// numNodes is the total number of servers in the ring.
+// port is the port number that this server should listen on.
 // nodeID is a random, unsigned 32-bit ID identifying this server.
 //
 // This function should return only once all storage servers have joined the ring,
 // and should return a non-nil error if the storage server could not be started.
+
+//The slave server should sleep for one second before sending
+// another RegisterServer request, and this process should repeat until the master
+// finally replies with an OK status indicating that the startup phase is complete.
 func NewStorageServer(masterServerHostPort string, numNodes, port int, nodeID uint32) (StorageServer, error) {
 	srv := new(storageServer)
-	srv.userMap = resource{content: make(map[string]string)}
-	srv.userSubMap = resourceList{content: make(map[string][]string)}
-	srv.userFriendMap = resourceList{content: make(map[string][]string)}
-	srv.userTribMap = resourceList{content: make(map[string][]string)}
-	srv.tribs = resource{content: make(map[string]string)}
+	srv.nodeInfo = storagerpc.Node{NodeID: nodeID, HostPort: fmt.Sprintf(":%d", port)}
+	srv.numNodes = numNodes
+	srv.httpServer = &http.Server{Addr: srv.nodeInfo.HostPort}
+	srv.store = make(map[string]interface{})
+
+	if err := rpc.RegisterName("StorageServer", storagerpc.Wrap(srv)); err != nil {
+		return nil, err
+	}
+	rpc.HandleHTTP()
 
 	if masterServerHostPort == "" {
 		srv.isMaster = true
-		srv.numNodes = numNodes
-		srv.masterPort = port
-		srv.joinNode = make(chan storagerpc.Node)
-
+		srv.nodes = append(srv.nodes, srv.nodeInfo)
+		srv.doneBootstrap = make(chan bool)
 	}
-	srv.listenPort = port
-	srv.nodeID = nodeID
 
-	if !srv.isMaster {
+	go func() {
+		err := srv.httpServer.ListenAndServe()
+		if err != nil {
+			LOGE.Fatalf("http server start failed with error: %v", err)
+		}
+	}()
+
+	if srv.isMaster {
+		<-srv.doneBootstrap
+	} else {
 		cli, err := rpc.DialHTTP("tcp", masterServerHostPort)
 		if err != nil {
 			return nil, err
 		}
-		nodeInfo := storagerpc.Node{NodeID: nodeID, HostPort: fmt.Sprintf(":%d", port)}
-		args := storagerpc.RegisterArgs{nodeInfo}
-		var reply storagerpc.RegisterReply
+		defer cli.Close()
 
+		args := storagerpc.RegisterArgs{ServerInfo: srv.nodeInfo}
 		for {
+			var reply storagerpc.RegisterReply
 			if err = cli.Call("StorageServer.RegisterServer", args, &reply); err != nil {
 				return nil, err
 			}
 			if reply.Status == storagerpc.OK {
+				srv.nodes = reply.Servers
 				break
 			} else {
 				time.Sleep(1 * time.Second)
 			}
 		}
-		srv.activeNodes.nodes = reply.Servers
-		for ix, n := range srv.activeNodes.nodes {
-			if n.NodeID == srv.nodeID {
-				if ix == 0 {
-					srv.prevNodeID = 0
-				} else {
-					srv.prevNodeID = srv.activeNodes.nodes[ix-1].NodeID
-				}
+	}
 
-			}
-		}
-	} else { // if master, then listen to RPC calls, until all joined
-
-		srv.activeNodes = nodeList{nodes: make([]storagerpc.Node, 1)}
-		srv.activeNodes.nodes[0] = storagerpc.Node{
-			HostPort: srv.masterHost,
-			NodeID:   srv.nodeID}
-
-		if err := rpc.RegisterName("StorageServer", storagerpc.Wrap(srv)); err != nil {
-			return nil, err
-		}
-
-		rpc.HandleHTTP()
-		go func() {
-			err := http.ListenAndServe(":"+strconv.Itoa(srv.listenPort), nil)
-			if err != nil {
-				fmt.Errorf("http server start failed with error: %v", err)
-			}
-		}()
-
-		for {
-			newNode := <-srv.joinNode
-			srv.activeNodes.Lock()
-			// insert based on nodeID
-			srv.activeNodes.nodes = append(srv.activeNodes.nodes, newNode)
-			for ix, n := range srv.activeNodes.nodes {
-				if newNode.NodeID < n.NodeID {
-					copy(srv.activeNodes.nodes[ix+1:], srv.activeNodes.nodes[ix:])
-					srv.activeNodes.nodes[ix] = newNode
-					break
-				}
-			}
-			if len(srv.activeNodes.nodes) == srv.numNodes {
-				srv.activeNodes.Unlock()
-				break
-			}
-			status := storagerpc.NotReady
-			if len(srv.activeNodes.nodes) == srv.numNodes {
-				status = storagerpc.OK
-			}
-			srv.activeNodes.Unlock()
-			srv.joinNodeReply <- status
-			if status == storagerpc.OK {
-				break
-			}
-
+	// get node index
+	srv.nodesMutex.RLock()
+	defer srv.nodesMutex.RUnlock()
+	for inx, n := range srv.nodes {
+		if n.NodeID == srv.nodeInfo.NodeID {
+			srv.nodeInx = inx
+			break
 		}
 	}
+
 	return srv, nil
-
 }
 
-func (ss *storageServer) getActiveNodes() []storagerpc.Node {
-	ss.activeNodes.RLock()
-	defer ss.activeNodes.RUnlock()
-
-	ret := make([]storagerpc.Node, len(ss.activeNodes.nodes))
-	copy(ss.activeNodes.nodes, ret)
-	return ret
-}
-
+// RegisterServer adds a storage server to the ring. It replies with
+// status NotReady if not all nodes in the ring have joined. Once
+// all nodes have joined, it should reply with status OK and a list
+// of all connected nodes in the ring.
 func (ss *storageServer) RegisterServer(args *storagerpc.RegisterArgs, reply *storagerpc.RegisterReply) error {
-	ss.joinNode <- args.ServerInfo
-	reply.Status = <-ss.joinNodeReply
-	reply.Servers = ss.getActiveNodes()
+	ss.nodesMutex.Lock()
+	defer ss.nodesMutex.Unlock()
+
+	// if calling RegisterServer after bootstrapping
+	if len(ss.nodes) == ss.numNodes {
+		reply.Status = storagerpc.OK
+		reply.Servers = append(reply.Servers, ss.nodes...)
+		return nil
+	}
+
+	// check if already exists
+	for _, n := range ss.nodes {
+		if n.NodeID == args.ServerInfo.NodeID {
+			reply.Status = storagerpc.NotReady
+			return nil
+		}
+	}
+
+	ss.nodes = append(ss.nodes, args.ServerInfo)
+	// if all nodes joined
+	if len(ss.nodes) == ss.numNodes {
+		sort.Sort(ByNodeID(ss.nodes))
+		reply.Servers = append(reply.Servers, ss.nodes...)
+		reply.Status = storagerpc.OK
+		ss.doneBootstrap <- true
+	} else {
+		reply.Status = storagerpc.NotReady
+	}
 	return nil
 }
 
+// GetServers retrieves a list of all connected nodes in the ring. It
+// replies with status NotReady if not all nodes in the ring have joined.
 func (ss *storageServer) GetServers(args *storagerpc.GetServersArgs, reply *storagerpc.GetServersReply) error {
-	ss.activeNodes.RLock()
-	defer ss.activeNodes.RUnlock()
-
-	if len(ss.activeNodes.nodes) < ss.numNodes {
+	ss.nodesMutex.RLock()
+	defer ss.nodesMutex.RUnlock()
+	if len(ss.nodes) < ss.numNodes {
 		reply.Status = storagerpc.NotReady
 	} else {
+		reply.Servers = append(reply.Servers, ss.nodes...)
 		reply.Status = storagerpc.OK
 	}
-	reply.Servers = ss.getActiveNodes()
-
 	return nil
 }
 
+// key hash should be smaller than the current nodeID, but larger than the pervious one in the node ring
+// if it's larger than the max nodeID, then it should be served by the smallest nodeID
 func (ss *storageServer) checkKeyValid(key string) bool {
 	hash := libstore.StoreHash(key)
-
-	if hash > ss.prevNodeID && hash <= ss.nodeID {
+	ss.nodesMutex.RLock()
+	defer ss.nodesMutex.RUnlock()
+	if ss.nodeInx == 0 {
+		if hash > ss.nodes[ss.numNodes-1].NodeID {
+			return true
+		}
+		if hash < ss.nodeInfo.NodeID {
+			return true
+		}
+		return false
+	}
+	if hash > ss.nodes[ss.nodeInx-1].NodeID && hash < ss.nodeInfo.NodeID {
 		return true
 	}
 	return false
 }
 
+// Get retrieves the specified key from the data store and replies with
+// the key's value and a lease if one was requested. If the key does not
+// fall within the storage server's range, it should reply with status
+// WrongServer. If the key is not found, it should reply with status
+// KeyNotFound.
 func (ss *storageServer) Get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
 
-	keyParts := strings.Split(args.Key, ":")
-	usrID := keyParts[0]
-	key := keyParts[1]
-
-	switch {
-	case key == "usrid":
-		ss.userMap.RLock()
-		if _, ok := ss.userMap.content[usrID]; ok {
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.userMap.RUnlock()
-
-	case strings.HasPrefix(key, "post_"):
-		ss.tribs.RLock()
-		if val, ok := ss.tribs.content[key]; ok {
-			reply.Value = val
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	default:
-		return fmt.Errorf("get does not accept key %s", key)
+	ss.storeMutex.RLock()
+	defer ss.storeMutex.RUnlock()
+	if _, ok := ss.store[args.Key]; ok {
+		reply.Value = ss.store[args.Key].(string)
+		reply.Status = storagerpc.OK
+	} else {
+		reply.Status = storagerpc.KeyNotFound
 	}
-
 	return nil
 }
 
+// Delete remove the specified key from the data store.
+// If the key does not fall within the storage server's range,
+// it should reply with status WrongServer.
+// If the key is not found, it should reply with status KeyNotFound.
 func (ss *storageServer) Delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
 
-	keyParts := strings.Split(args.Key, ":")
-	// usrID := keyParts[0]
-	key := keyParts[1]
-
-	switch {
-	case key == "usrid":
-		return fmt.Errorf("Cannot remove a user")
-
-	case strings.HasPrefix(key, "post_"):
-		ss.tribs.Lock()
-		if _, ok := ss.tribs.content[key]; ok {
-			delete(ss.tribs.content, key)
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	default:
-		return fmt.Errorf("get does not accept key %s", key)
+	ss.storeMutex.Lock()
+	defer ss.storeMutex.Unlock()
+	if _, ok := ss.store[args.Key]; ok {
+		delete(ss.store, args.Key)
+		reply.Status = storagerpc.OK
+	} else {
+		reply.Status = storagerpc.KeyNotFound
 	}
-
 	return nil
 }
 
+// GetList retrieves the specified key from the data store and replies with
+// the key's list value and a lease if one was requested. If the key does not
+// fall within the storage server's range, it should reply with status
+// WrongServer. If the key is not found, it should reply with status
+// KeyNotFound.
 func (ss *storageServer) GetList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
-	keyParts := strings.Split(args.Key, ":")
-	usrID := keyParts[0]
-	key := keyParts[1]
-	switch {
-	case key == "sublist":
-		ss.userSubMap.RLock()
-		if subs, ok := ss.userSubMap.content[usrID]; ok {
-			reply.Status = storagerpc.OK
-			for _, sub := range subs {
-				ss.userTribMap.RLock()
-				tribs := ss.userTribMap.content[sub]
-				reply.Value = append(reply.Value, tribs...)
-				ss.userTribMap.RUnlock()
-			}
-		} else {
-			reply.Status = storagerpc.ItemNotFound
+	ss.storeMutex.RLock()
+	defer ss.storeMutex.RUnlock()
+	if _, ok := ss.store[args.Key]; ok {
+		m := ss.store[args.Key].(map[string]bool)
+		for k := range m {
+			reply.Value = append(reply.Value, k)
 		}
-		ss.userSubMap.RUnlock()
-
-	case key == "triblist":
-		ss.tribs.RLock()
-		if val, ok := ss.userTribMap.content[usrID]; ok {
-			reply.Value = val
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	case key == "friendlist":
-		ss.userFriendMap.RLock()
-		if val, ok := ss.userFriendMap.content[usrID]; ok {
-			reply.Value = val
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	default:
-		return fmt.Errorf("get does not accept key %s", key)
+		reply.Status = storagerpc.OK
+	} else {
+		reply.Status = storagerpc.KeyNotFound
 	}
 	return nil
 }
 
+// Put inserts the specified key/value pair into the data store. If
+// the key does not fall within the storage server's range, it should
+// reply with status WrongServer.
 func (ss *storageServer) Put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
 
-	keyParts := strings.Split(args.Key, ":")
-	usrID := keyParts[0]
-	key := keyParts[1]
-
-	switch {
-	case key == "usrid":
-		ss.userMap.Lock()
-		ss.userMap.content[usrID] = "true"
-		ss.userMap.Unlock()
-
-	case strings.HasPrefix(key, "post_"):
-		ss.tribs.Lock()
-		ss.tribs.content[key] = args.Value
-		ss.tribs.RUnlock()
-
-	default:
-		return fmt.Errorf("put does not accept key %s", key)
-	}
+	ss.storeMutex.Lock()
+	defer ss.storeMutex.Unlock()
+	ss.store[args.Key] = args.Value
+	reply.Status = storagerpc.OK
 
 	return nil
 }
 
+// AppendToList retrieves the specified key from the data store and appends
+// the specified value to its list. If the key does not fall within the
+// receiving server's range, it should reply with status WrongServer. If
+// the specified value is already contained in the list, it should reply
+// with status ItemExists.
 func (ss *storageServer) AppendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
 	}
 
-	keyParts := strings.Split(args.Key, ":")
-	usrID := keyParts[0]
-	key := keyParts[1]
-	switch {
-	case key == "sublist":
-		ss.userSubMap.RLock()
-		if _, ok := ss.userSubMap.content[usrID]; ok {
-			reply.Status = storagerpc.OK
-			// for _, sub := range subs {
-			// 	ss.userTribMap.RLock()
-			//	tribs := ss.userTribMap.content[sub]
-			// 	ss.userTribMap.RUnlock()
-			// }
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.userSubMap.RUnlock()
+	ss.storeMutex.Lock()
+	defer ss.storeMutex.Unlock()
 
-	case key == "triblist":
-		ss.tribs.RLock()
-		if _, ok := ss.userTribMap.content[usrID]; ok {
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	case key == "friendlist":
-		ss.userFriendMap.RLock()
-		if _, ok := ss.userFriendMap.content[usrID]; ok {
-			reply.Status = storagerpc.OK
-		} else {
-			reply.Status = storagerpc.ItemNotFound
-		}
-		ss.tribs.RUnlock()
-
-	default:
-		return fmt.Errorf("get does not accept key %s", key)
+	if _, ok := ss.store[args.Key]; !ok {
+		newList := make(map[string]bool)
+		ss.store[args.Key] = newList
+	}
+	m := ss.store[args.Key].(map[string]bool)
+	if _, ok := m[args.Value]; ok {
+		reply.Status = storagerpc.ItemExists
+	} else {
+		m[args.Value] = true
+		ss.store[args.Key] = m
+		reply.Status = storagerpc.OK
 	}
 	return nil
 }
 
+// RemoveFromList retrieves the specified key from the data store and removes
+// the specified value from its list. If the key does not fall within the
+// receiving server's range, it should reply with status WrongServer. If
+// the specified value is not already contained in the list, it should reply
+// with status ItemNotFound.
 func (ss *storageServer) RemoveFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	if !ss.checkKeyValid(args.Key) {
 		reply.Status = storagerpc.WrongServer
 		return nil
+	}
+
+	ss.storeMutex.Lock()
+	defer ss.storeMutex.Unlock()
+
+	m := ss.store[args.Key].(map[string]bool)
+	if _, ok := m[args.Value]; ok {
+		delete(m, args.Value)
+		ss.store[args.Key] = m
+		reply.Status = storagerpc.OK
+	} else {
+		reply.Status = storagerpc.ItemNotFound
 	}
 
 	return nil
