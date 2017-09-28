@@ -116,6 +116,11 @@ func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tri
 
 	userSublistKey := util.FormatSubListKey(args.UserID)
 	if err := ts.ls.AppendToList(userSublistKey, args.TargetUserID); err != nil {
+		// already added by some other user
+		if strings.Contains(err.Error(), "exists") {
+			reply.Status = tribrpc.Exists
+			return nil
+		}
 		return err
 	}
 
@@ -150,6 +155,11 @@ func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *
 
 	userSublistKey := util.FormatSubListKey(args.UserID)
 	if err := ts.ls.RemoveFromList(userSublistKey, args.TargetUserID); err != nil {
+		// already removed by some other user
+		if strings.Contains(err.Error(), "not found") {
+			reply.Status = tribrpc.NoSuchTargetUser
+			return nil
+		}
 		return err
 	}
 	reply.Status = tribrpc.OK
@@ -209,6 +219,11 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 	// add to tribble list
 	tribListKey := util.FormatTribListKey(args.UserID)
 	if err := ts.ls.AppendToList(tribListKey, postKey); err != nil {
+		// already added by some other user
+		if strings.Contains(err.Error(), "exists") {
+			reply.Status = tribrpc.Exists
+			return nil
+		}
 		return err
 	}
 
@@ -231,11 +246,18 @@ func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *trib
 
 	// check whether the key exists
 	if _, err := ts.ls.Get(args.PostKey); err != nil {
-		reply.Status = tribrpc.NoSuchPost
-		return nil
+		if strings.Contains(err.Error(), "not found") {
+			reply.Status = tribrpc.NoSuchPost
+			return nil
+		}
+		return err
 	}
 
 	if err := ts.ls.Delete(args.PostKey); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			reply.Status = tribrpc.NoSuchPost
+			return nil
+		}
 		return err
 	}
 	reply.Status = tribrpc.OK

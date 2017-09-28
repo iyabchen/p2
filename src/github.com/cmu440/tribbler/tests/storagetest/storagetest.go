@@ -470,6 +470,7 @@ func testUpdateBeforeLeaseExpire() {
 	// update this key
 	replyP, err := st.Put(key, "value1")
 	if checkErrorStatus(err, replyP.Status, storagerpc.OK) {
+		fmt.Println("fail 1")
 		return
 	}
 
@@ -664,6 +665,7 @@ func delayedRevoke(key string, f func() bool) bool {
 			return
 		}
 		if checkErrorStatus(err, replyP.Status, storagerpc.OK) {
+			fmt.Println("fail 3")
 			doneCh <- true
 			return
 		}
@@ -696,11 +698,13 @@ func testDelayedRevokeWithoutBlocking() {
 		ts := time.Now()
 		// put key2, this should not block
 		replyP, err := st.Put(key2, "value")
+
 		if checkErrorStatus(err, replyP.Status, storagerpc.OK) {
 			return true
 		}
 		if !isTimeOK(time.Since(ts)) {
 			LOGE.Println("FAIL: concurrent Put got blocked")
+			fmt.Println("failed 1")
 			failCount++
 			return true
 		}
@@ -752,6 +756,7 @@ func testDelayedRevokeWithLeaseRequest1() {
 		if isTimeOK(time.Since(ts)) {
 			// in this case, server should reply old value and refuse lease
 			if replyG.Lease.Granted || replyG.Value != "old-value" {
+				LOGE.Println(replyG.Lease.Granted)
 				LOGE.Println("FAIL: server should return old value and not grant lease")
 				failCount++
 				return true
@@ -874,6 +879,7 @@ func testDelayedRevokeWithUpdate2() {
 		// put key1, this should block
 		replyP, err := st.Put(key1, "newnew-value")
 		if checkErrorStatus(err, replyP.Status, storagerpc.OK) {
+			fmt.Println("fail 1")
 			return true
 		}
 		d := time.Since(ts)
@@ -889,6 +895,7 @@ func testDelayedRevokeWithUpdate2() {
 		}
 		replyG, err := st.Get(key1, false)
 		if checkErrorStatus(err, replyG.Status, storagerpc.OK) {
+			fmt.Println("fail 2")
 			return true
 		}
 		if replyG.Value != "newnew-value" {
